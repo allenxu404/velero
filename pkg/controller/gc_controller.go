@@ -21,7 +21,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/apex/log"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
