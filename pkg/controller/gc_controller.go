@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/apex/log"
@@ -44,6 +45,8 @@ const (
 	gcFailureBSLCannotGet    = "BSLCannotGet"
 	gcFailureBSLReadOnly     = "BSLReadOnly"
 )
+
+var once = sync.Once{}
 
 // gcReconciler creates DeleteBackupRequests for expired backups.
 type gcReconciler struct {
@@ -103,35 +106,72 @@ func (c *gcReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // +kubebuilder:rbac:groups=velero.io,resources=backupstoragelocations,verbs=get
 func (c *gcReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log.Info("mock matrics")
-	// mock matrics
-	// mock csi
-	c.metrics.RegisterCSISnapshotAttempts("", "nginx-backup-08301024", 1)
-	c.metrics.RegisterCSISnapshotSuccesses("", "nginx-backup-08301024", 1)
-	c.metrics.RegisterCSISnapshotSuccesses("nginx-cron", "nginx-cron-20220830033835", 1)
-	c.metrics.RegisterCSISnapshotSuccesses("nginx-cron", "nginx-cron-20220830033835", 1)
 
-	// mock resitc
-	c.metrics.RegisterPodVolumeBackupEnqueue("docker-desktop")
-	c.metrics.RegisterPodVolumeBackupDequeue("docker-desktop")
-	c.metrics.ObserveResticOpLatency("docker-desktop", "pvb", "update", "velero/nginx-backup-08301024", float64(30))
-	c.metrics.RegisterResticOpLatencyGauge("docker-desktop", "pvb", "update", "velero/nginx-backup-08301024", float64(30))
+	once.Do(func() {
+		c.metrics = metrics.NewResticServerMetrics()
+		c.metrics.RegisterAllMetrics()
+		c.metrics.InitResticMetricsForNode("docker-desktop")
 
-	c.metrics.RegisterPodVolumeBackupEnqueue("docker-desktop")
-	c.metrics.RegisterPodVolumeBackupDequeue("docker-desktop")
-	c.metrics.ObserveResticOpLatency("docker-desktop", "pvb", "update", "velero/nginx-backup-08301024", float64(80))
-	c.metrics.RegisterResticOpLatencyGauge("docker-desktop", "pvb", "update", "velero/nginx-backup-08301024", float64(80))
+		// mock matrics
+		// mock csi
+		c.metrics.RegisterCSISnapshotAttempts("", "nginx-backup-08301024", 1)
+		c.metrics.RegisterCSISnapshotSuccesses("", "nginx-backup-08301024", 1)
+		c.metrics.RegisterCSISnapshotSuccesses("nginx-cron", "nginx-cron-20220830033835", 1)
+		c.metrics.RegisterCSISnapshotSuccesses("nginx-cron", "nginx-cron-20220830033835", 1)
 
-	c.metrics.RegisterPodVolumeBackupEnqueue("docker-desktop")
+		// mock resitc
+		c.metrics.RegisterPodVolumeBackupEnqueue("docker-desktop")
+		c.metrics.RegisterPodVolumeBackupDequeue("docker-desktop")
+		c.metrics.ObserveResticOpLatency("docker-desktop", "pvb", "update", "velero/nginx-backup-08301024", float64(30))
+		c.metrics.RegisterResticOpLatencyGauge("docker-desktop", "pvb", "update", "velero/nginx-backup-08301024", float64(30))
 
-	c.metrics.RegisterPodVolumeBackupEnqueue("docker-desktop")
-	c.metrics.RegisterPodVolumeBackupDequeue("docker-desktop")
-	c.metrics.ObserveResticOpLatency("docker-desktop", "pvb2", "create", "velero/nginx-cron-20220830033835", float64(500))
-	c.metrics.RegisterResticOpLatencyGauge("docker-desktop", "pvb2", "create", "velero/nginx-cron-20220830033835", float64(500))
+		c.metrics.RegisterPodVolumeBackupEnqueue("docker-desktop")
+		c.metrics.RegisterPodVolumeBackupDequeue("docker-desktop")
+		c.metrics.ObserveResticOpLatency("docker-desktop", "pvb", "update", "velero/nginx-backup-08301024", float64(80))
+		c.metrics.RegisterResticOpLatencyGauge("docker-desktop", "pvb", "update", "velero/nginx-backup-08301024", float64(80))
 
-	c.metrics.RegisterPodVolumeBackupEnqueue("docker-desktop")
-	c.metrics.RegisterPodVolumeBackupDequeue("docker-desktop")
-	c.metrics.ObserveResticOpLatency("docker-desktop", "pvb2", "create", "velero/nginx-cron-20220830033835", float64(1600))
-	c.metrics.RegisterResticOpLatencyGauge("docker-desktop", "pvb2", "create", "velero/nginx-cron-20220830033835", float64(1600))
+		c.metrics.RegisterPodVolumeBackupEnqueue("docker-desktop")
+
+		c.metrics.RegisterPodVolumeBackupEnqueue("docker-desktop")
+		c.metrics.RegisterPodVolumeBackupDequeue("docker-desktop")
+		c.metrics.ObserveResticOpLatency("docker-desktop", "pvb2", "create", "velero/nginx-cron-20220830033835", float64(500))
+		c.metrics.RegisterResticOpLatencyGauge("docker-desktop", "pvb2", "create", "velero/nginx-cron-20220830033835", float64(500))
+
+		c.metrics.RegisterPodVolumeBackupEnqueue("docker-desktop")
+		c.metrics.RegisterPodVolumeBackupDequeue("docker-desktop")
+		c.metrics.ObserveResticOpLatency("docker-desktop", "pvb2", "create", "velero/nginx-cron-20220830033835", float64(1600))
+		c.metrics.RegisterResticOpLatencyGauge("docker-desktop", "pvb2", "create", "velero/nginx-cron-20220830033835", float64(1600))
+	})
+
+	// // mock matrics
+	// // mock csi
+	// c.metrics.RegisterCSISnapshotAttempts("", "nginx-backup-08301024", 1)
+	// c.metrics.RegisterCSISnapshotSuccesses("", "nginx-backup-08301024", 1)
+	// c.metrics.RegisterCSISnapshotSuccesses("nginx-cron", "nginx-cron-20220830033835", 1)
+	// c.metrics.RegisterCSISnapshotSuccesses("nginx-cron", "nginx-cron-20220830033835", 1)
+
+	// // mock resitc
+	// c.metrics.RegisterPodVolumeBackupEnqueue("docker-desktop")
+	// c.metrics.RegisterPodVolumeBackupDequeue("docker-desktop")
+	// c.metrics.ObserveResticOpLatency("docker-desktop", "pvb", "update", "velero/nginx-backup-08301024", float64(30))
+	// c.metrics.RegisterResticOpLatencyGauge("docker-desktop", "pvb", "update", "velero/nginx-backup-08301024", float64(30))
+
+	// c.metrics.RegisterPodVolumeBackupEnqueue("docker-desktop")
+	// c.metrics.RegisterPodVolumeBackupDequeue("docker-desktop")
+	// c.metrics.ObserveResticOpLatency("docker-desktop", "pvb", "update", "velero/nginx-backup-08301024", float64(80))
+	// c.metrics.RegisterResticOpLatencyGauge("docker-desktop", "pvb", "update", "velero/nginx-backup-08301024", float64(80))
+
+	// c.metrics.RegisterPodVolumeBackupEnqueue("docker-desktop")
+
+	// c.metrics.RegisterPodVolumeBackupEnqueue("docker-desktop")
+	// c.metrics.RegisterPodVolumeBackupDequeue("docker-desktop")
+	// c.metrics.ObserveResticOpLatency("docker-desktop", "pvb2", "create", "velero/nginx-cron-20220830033835", float64(500))
+	// c.metrics.RegisterResticOpLatencyGauge("docker-desktop", "pvb2", "create", "velero/nginx-cron-20220830033835", float64(500))
+
+	// c.metrics.RegisterPodVolumeBackupEnqueue("docker-desktop")
+	// c.metrics.RegisterPodVolumeBackupDequeue("docker-desktop")
+	// c.metrics.ObserveResticOpLatency("docker-desktop", "pvb2", "create", "velero/nginx-cron-20220830033835", float64(1600))
+	// c.metrics.RegisterResticOpLatencyGauge("docker-desktop", "pvb2", "create", "velero/nginx-cron-20220830033835", float64(1600))
 
 	log := c.logger.WithField("gc backup", req.String())
 	log.Debug("gcController getting backup")
