@@ -137,6 +137,7 @@ func DaemonSet(namespace string, opts ...podTemplateOption) *appsv1.DaemonSet {
 								},
 							},
 							Resources: c.resources,
+							Ports:     containerPorts(),
 						},
 					},
 				},

@@ -193,14 +193,15 @@ func newNodeAgentServer(logger logrus.FieldLogger, factory client.Factory, confi
 	}
 
 	s := &nodeAgentServer{
-		logger:     logger,
-		ctx:        ctx,
-		cancelFunc: cancelFunc,
-		fileSystem: filesystem.NewFileSystem(),
-		mgr:        mgr,
-		config:     config,
-		namespace:  factory.Namespace(),
-		nodeName:   nodeName,
+		logger:         logger,
+		ctx:            ctx,
+		cancelFunc:     cancelFunc,
+		fileSystem:     filesystem.NewFileSystem(),
+		mgr:            mgr,
+		config:         config,
+		namespace:      factory.Namespace(),
+		nodeName:       nodeName,
+		metricsAddress: config.metricsAddress,
 	}
 
 	// the cache isn't initialized yet when "validatePodVolumesHostPath" is called, the client returned by the manager cannot
