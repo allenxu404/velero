@@ -544,6 +544,13 @@ spec:
                 description: FormatVersion is the backup format version, including
                   major, minor, and patch version.
                 type: string
+              hooksAttempted:
+                description: HooksAttempted is the total number of attempted hooks
+                type: integer
+              hooksFailed:
+                description: HooksFailed is the total number of hooks which ended
+                  with an error
+                type: integer
               phase:
                 description: Phase is the current state of the Backup.
                 enum:

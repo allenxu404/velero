@@ -392,6 +392,13 @@ func DescribeBackupStatus(ctx context.Context, kbClient kbclient.Client, d *Desc
 	}
 
 	d.Printf("Velero-Native Snapshots: <none included>\n")
+
+	if status.HooksAttempted > 0 {
+		d.Println()
+		d.Printf("HooksAttempted:\t%d\n", status.HooksAttempted)
+		d.Printf("HooksFailed:\t%d\n", status.HooksFailed)
+	}
+
 }
 
 func describeBackupItemOperations(ctx context.Context, kbClient kbclient.Client, d *Describer, backup *velerov1api.Backup, details bool, insecureSkipTLSVerify bool, caCertPath string) {

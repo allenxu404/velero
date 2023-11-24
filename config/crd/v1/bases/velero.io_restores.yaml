@@ -440,6 +440,13 @@ spec:
                 description: FailureReason is an error that caused the entire restore
                   to fail.
                 type: string
+              hooksAttempted:
+                description: HooksAttempted is the total number of attempted hooks
+                type: integer
+              hooksFailed:
+                description: HooksFailed is the total number of hooks which ended
+                  with an error.
+                type: integer
               phase:
                 description: Phase is the current state of the Restore
                 enum:

@@ -180,10 +180,17 @@ func DescribeRestore(ctx context.Context, kbClient kbclient.Client, restore *vel
 		d.Println()
 		describeRestoreItemOperations(ctx, kbClient, d, restore, details, insecureSkipTLSVerify, caCertFile)
 
+		if restore.Status.HooksAttempted > 0 {
+			d.Println()
+			d.Printf("HooksAttempted: \t%d\n", restore.Status.HooksAttempted)
+			d.Printf("HooksFailed: \t%d\n", restore.Status.HooksFailed)
+		}
+
 		if details {
 			describeRestoreResourceList(ctx, kbClient, d, restore, insecureSkipTLSVerify, caCertFile)
 			d.Println()
 		}
+
 	})
 }
 

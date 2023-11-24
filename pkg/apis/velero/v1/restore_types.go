@@ -345,6 +345,14 @@ type RestoreStatus struct {
 	// RestoreItemAction operations for this restore which ended with an error.
 	// +optional
 	RestoreItemOperationsFailed int `json:"restoreItemOperationsFailed,omitempty"`
+
+	// HooksAttempted is the total number of attempted hooks
+	// +optional
+	HooksAttempted int `json:"hooksAttempted,omitempty"`
+
+	// HooksFailed is the total number of hooks which ended with an error.
+	// +optional
+	HooksFailed int `json:"hooksFailed,omitempty"`
 }
 
 // RestoreProgress stores information about the restore's execution progress

@@ -441,6 +441,14 @@ type BackupStatus struct {
 	// BackupItemAction operations for this backup which ended with an error.
 	// +optional
 	BackupItemOperationsFailed int `json:"backupItemOperationsFailed,omitempty"`
+
+	// HooksAttempted is the total number of attempted hooks
+	// +optional
+	HooksAttempted int `json:"hooksAttempted,omitempty"`
+
+	// HooksFailed is the total number of hooks which ended with an error
+	// +optional
+	HooksFailed int `json:"hooksFailed,omitempty"`
 }
 
 // BackupProgress stores information about the progress of a Backup's execution.
