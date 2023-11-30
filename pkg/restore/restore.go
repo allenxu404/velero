@@ -49,6 +49,7 @@ import (
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
+	crcConfig "sigs.k8s.io/controller-runtime/pkg/client/config"
 
 	"github.com/vmware-tanzu/velero/internal/credentials"
 	"github.com/vmware-tanzu/velero/internal/hook"
@@ -694,6 +695,11 @@ func (ctx *restoreContext) execute() (results.Result, results.Result) {
 	if err != nil {
 		ctx.log.WithError(errors.WithStack((err))).Warn("Updating restore status")
 	}
+
+	// patches newly dynamically provisioned PV with backupVolumeInfoMap
+	w, e = ctx.patchDynamicPV(CreateVolumeInfoMap())
+	warnings.Merge(&w)
+	errs.Merge(&e)
 
 	return warnings, errs
 }
@@ -2482,4 +2488,176 @@ func (ctx *restoreContext) processUpdateResourcePolicy(fromCluster, fromClusterW
 		ctx.log.Infof("%s %s successfully updated", obj.GroupVersionKind().Kind, kube.NamespaceAndName(obj))
 	}
 	return warnings, errs
+}
+
+// patchDynamicPV patches newly dynamically provisioned PV with backedup PV data
+// in order to restore custom settings that would otherwise be lost during dynamic PV recreation.
+func (ctx *restoreContext) patchDynamicPV(backupVolumeInfoMap map[string]volume.VolumeInfo) (warnings, errs results.Result) {
+	logger := ctx.log.WithField("progress", "patchDynamicPV")
+	logger.Info("patching dynamic PV starts")
+
+	var pvWaitGroup sync.WaitGroup
+	var pvLock sync.Mutex
+	for _, volumeInfo := range backupVolumeInfoMap {
+		if volumeInfo.BackupMethod == "PodVolumeBackup" || volumeInfo.BackupMethod == "CSISnapshot" ||
+			(volumeInfo.BackupMethod == "" && volumeInfo.PVInfo.ReclaimPolicy == string(v1.PersistentVolumeReclaimDelete)) {
+			// Determine restored PVC namespace
+			restoredNamespace := volumeInfo.PVCNamespace
+			if remapped, ok := ctx.restore.Spec.NamespaceMapping[restoredNamespace]; ok {
+				restoredNamespace = remapped
+			}
+
+			// Check if PVC was already restored. If not, skip.
+			itemKey := itemKey{
+				resource: resourceKey(&v1.PersistentVolumeClaim{TypeMeta: metav1.TypeMeta{
+					APIVersion: "v1",
+					Kind:       "PersistentVolumeClaim",
+				}}),
+				namespace: restoredNamespace,
+				name:      volumeInfo.PVCName,
+			}
+			itemStatus, itemStatusExists := ctx.restoredItems[itemKey]
+			if !itemStatusExists || !itemStatus.itemExists {
+				continue
+			}
+
+			cl, err := crclient.New(crcConfig.GetConfigOrDie(), crclient.Options{})
+			if err != nil {
+				logger.Errorf("error creating client: %s", err)
+				return
+			}
+			ctx.kbClient = cl
+
+			pvWaitGroup.Add(1)
+			go func(volInfo volume.VolumeInfo, restoredNamespace string) {
+				defer pvWaitGroup.Done()
+				logger.WithField("pvc", volInfo.PVCName).WithField("pvcNamespace", restoredNamespace).Info("patching dynamic PV in progress")
+
+				var MaximumDuration = 3 * time.Minute
+				err := wait.PollImmediate(5*time.Second, MaximumDuration, func() (bool, error) {
+					// wait PVC bound
+					pvc := &v1.PersistentVolumeClaim{}
+					err := ctx.kbClient.Get(go_context.Background(), crclient.ObjectKey{Name: volInfo.PVCName, Namespace: restoredNamespace}, pvc)
+					if apierrors.IsNotFound(err) {
+						logger.WithField("pvc", volInfo.PVCName).WithField("pvcNamespace", restoredNamespace).Info("hit not found error")
+						return false, nil
+					}
+					if err != nil {
+						return false, err
+					}
+
+					if pvc.Status.Phase != v1.ClaimBound || pvc.Spec.VolumeName == "" {
+						logger.WithField("pvc", volInfo.PVCName).WithField("pvcNamespace", restoredNamespace).Info("pvc not ready")
+						return false, nil
+					}
+
+					// wait PV bound
+					newPVName := pvc.Spec.VolumeName
+					newPV := &v1.PersistentVolume{}
+					err = ctx.kbClient.Get(go_context.Background(), crclient.ObjectKey{Name: newPVName}, newPV)
+					if apierrors.IsNotFound(err) {
+						logger.WithField("pvc", volInfo.PVCName).WithField("pvcNamespace", restoredNamespace).Info("pvc not ready")
+						return false, nil
+					}
+					if err != nil {
+						return false, err
+					}
+
+					if newPV.Spec.ClaimRef == nil || newPV.Status.Phase != v1.VolumeBound {
+						logger.WithField("pv", newPVName).Info("pv not ready")
+						return false, nil
+					}
+
+					if newPV.Spec.ClaimRef.Name != pvc.Name || newPV.Spec.ClaimRef.Namespace != restoredNamespace {
+						return false, fmt.Errorf("PV was bound by unexpected PVC, unexpected PVC: %s/%s, expected PVC: %s/%s", newPV.Spec.ClaimRef.Namespace, newPV.Spec.ClaimRef.Name, restoredNamespace, pvc.Name)
+					}
+
+					// patch PV's reclaim policy and label with backedup PV data
+					updatedPV := newPV.DeepCopy()
+					if updatedPV.Labels == nil {
+						updatedPV.Labels = make(map[string]string)
+					}
+					for key, val := range volInfo.PVInfo.Labels {
+						updatedPV.Labels[key] = val
+					}
+					updatedPV.Spec.PersistentVolumeReclaimPolicy = v1.PersistentVolumeReclaimPolicy(volInfo.PVInfo.ReclaimPolicy)
+					if err := kube.PatchResource(newPV, updatedPV, ctx.kbClient); err != nil {
+						return false, err
+					}
+
+					logger.WithFields(logrus.Fields{"pvc": volInfo.PVCName, "pvcNamespace": restoredNamespace, "pv": newPVName}).Infof("dynamic PV has been patched with backedup PV data")
+					return true, nil
+				})
+
+				if err != nil {
+					err = fmt.Errorf("fail to patch dynamic PV, err: %s, PVC: %s, orignal PV: %s", err, volInfo.PVCName, volInfo.PVName)
+					logger.WithError(errors.WithStack((err))).Error("Got error patching dynamic PV")
+					pvLock.Lock()
+					errs.Add(restoredNamespace, err)
+					pvLock.Unlock()
+				}
+			}(volumeInfo, restoredNamespace)
+		}
+	}
+
+	pvWaitGroup.Wait()
+	logger.Info("patching dynamic PV ends")
+
+	return warnings, errs
+}
+
+func CreateVolumeInfoMap() map[string]volume.VolumeInfo {
+	backupVolumeInfoMap := make(map[string]volume.VolumeInfo)
+	str := `{
+		"pvc-c7925558-8060-41d6-af5a-32a11e37fe65":
+			{
+				"pvcName":"nginx-logs",
+				"pvcNamespace":"nginx-example",
+				"pvName":"pvc-c7925558-8060-41d6-af5a-32a11e37fe65",
+				"backupMethod":"CSISnapshot",
+				"snapshotDataMoved":true,
+				"preserveLocalSnapshot":false,
+				"skipped":false,
+				"startTimestamp":"2023-11-30T13:45:18Z",
+				"operationID":"du-1f0c9c3e-d988-4248-934a-b399583a6fdb.c7925558-8060-41d80b30e",
+				"csiSnapshotInfo":{
+					"snapshotHandle":"",
+					"size":0,
+					"driver":"disk.csi.azure.com",
+					"vscName":""
+				},
+				"snapshotDataMovementInfo":{
+					"dataMover":"",
+					"uploaderType":"kopia",
+					"retainedSnapshot":"",
+					"snapshotHandle":""
+				},
+				"nativeSnapshotInfo":{
+					"snapshotHandle":"",
+					"volumeType":"",
+					"volumeAZ":"",
+					"iops":""
+				},
+				"pvbInfo":{
+					"snapshotHandle":"",
+					"size":0,
+					"uploaderType":"",
+					"volumeName":"",
+					"podName":"",
+					"podNamespace":"",
+					"nodeName":""
+				},
+				"pvInfo":{
+					"reclaimPolicy":"Retain",
+					"labels":{
+						"allentest/data":"True",
+						"velero.io/dynamic-pv-restore":"nginx-example.nginx-logs.7nb8c"
+					}
+				}
+			}
+		
+	}`
+
+	_ = json.Unmarshal([]byte(str), &backupVolumeInfoMap)
+	return backupVolumeInfoMap
 }
