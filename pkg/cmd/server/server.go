@@ -890,6 +890,7 @@ func (s *server) runControllers(defaultVolumeSnapshotLocations map[string]string
 			s.credentialFileStore,
 			s.mgr.GetClient(),
 			s.featureVerifier,
+			s.crClient,
 		)
 
 		cmd.CheckError(err)

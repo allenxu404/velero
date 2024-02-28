@@ -59,6 +59,8 @@ import (
 	kubeutil "github.com/vmware-tanzu/velero/pkg/util/kube"
 	. "github.com/vmware-tanzu/velero/pkg/util/results"
 	"github.com/vmware-tanzu/velero/pkg/volume"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
+	crcConfig "sigs.k8s.io/controller-runtime/pkg/client/config"
 )
 
 // TestRestoreResourceFiltering runs restores with different combinations
@@ -3989,4 +3991,409 @@ func TestHasSnapshotDataUpload(t *testing.T) {
 			require.Equal(t, tc.expectedResult, hasSnapshotDataUpload(ctx, tc.obj))
 		})
 	}
+}
+
+func TestPatchDynamicPV(t *testing.T) {
+	rk := resourceKey(&corev1api.PersistentVolumeClaim{TypeMeta: metav1.TypeMeta{
+		APIVersion: "v1",
+		Kind:       "PersistentVolumeClaim",
+	}})
+	t.Logf("rk: %s", rk)
+
+	tests := []struct {
+		name                string
+		backupVolumeInfoMap map[string]volume.VolumeInfo
+		restoredItems       map[itemKey]restoredItemStatus
+		restore             *velerov1api.Restore
+		restoredPVC         []*corev1api.PersistentVolumeClaim
+		restoredPV          []*corev1api.PersistentVolume
+		expectedPatch       map[string]volume.PVInfo
+		expectedErrNum      int
+	}{
+		{
+			name:                "no applicable volumeInfo",
+			backupVolumeInfoMap: map[string]volume.VolumeInfo{"pv": {BackupMethod: "VeleroNativeSnapshot", PVCName: "pvc1"}},
+			restore:             builder.ForRestore(velerov1api.DefaultNamespace, "restore").Result(),
+			expectedPatch:       nil,
+			expectedErrNum:      0,
+		},
+		{
+			name:                "no restored PVC",
+			backupVolumeInfoMap: map[string]volume.VolumeInfo{"pv": {BackupMethod: "PodVolumeBackup", PVCName: "pvc1"}},
+			restore:             builder.ForRestore(velerov1api.DefaultNamespace, "restore").Result(),
+			expectedPatch:       nil,
+			expectedErrNum:      0,
+		},
+		{
+			name: "an applicable volumeInfo",
+			backupVolumeInfoMap: map[string]volume.VolumeInfo{"pv": {
+				BackupMethod: "PodVolumeBackup",
+				PVCName:      "pvc1",
+				PVName:       "pv1",
+				PVCNamespace: "ns1",
+				PVInfo: volume.PVInfo{
+					ReclaimPolicy: string(corev1api.PersistentVolumeReclaimDelete),
+					Labels:        map[string]string{"label1": "label1-val"},
+				},
+			}},
+			restore:       builder.ForRestore(velerov1api.DefaultNamespace, "restore").Result(),
+			restoredItems: map[itemKey]restoredItemStatus{{resource: rk, namespace: "ns1", name: "pvc1"}: {itemExists: true}},
+			restoredPV: []*corev1api.PersistentVolume{
+				builder.ForPersistentVolume("new-pv1").ClaimRef("ns1", "pvc1").Phase(corev1api.VolumeBound).ReclaimPolicy(corev1api.PersistentVolumeReclaimRetain).Result()},
+			restoredPVC: []*corev1api.PersistentVolumeClaim{
+				builder.ForPersistentVolumeClaim("ns1", "pvc1").VolumeName("new-pv1").Phase(corev1api.ClaimBound).Result(),
+			},
+			expectedPatch: map[string]volume.PVInfo{"new-pv1": {
+				ReclaimPolicy: string(corev1api.PersistentVolumeReclaimDelete),
+				Labels:        map[string]string{"label1": "label1-val"},
+			}},
+			expectedErrNum: 0,
+		},
+		{
+			name: "a mapped namespace volumeInfo",
+			backupVolumeInfoMap: map[string]volume.VolumeInfo{"pv": {
+				BackupMethod: "PodVolumeBackup",
+				PVCName:      "pvc1",
+				PVName:       "pv1",
+				PVCNamespace: "ns2",
+				PVInfo: volume.PVInfo{
+					ReclaimPolicy: string(corev1api.PersistentVolumeReclaimDelete),
+					Labels:        map[string]string{"label1": "label1-val"},
+				},
+			}},
+			restore:       builder.ForRestore(velerov1api.DefaultNamespace, "restore").NamespaceMappings("ns2", "ns1").Result(),
+			restoredItems: map[itemKey]restoredItemStatus{{resource: rk, namespace: "ns1", name: "pvc1"}: {itemExists: true}},
+			restoredPV: []*corev1api.PersistentVolume{
+				builder.ForPersistentVolume("new-pv1").ClaimRef("ns1", "pvc1").Phase(corev1api.VolumeBound).ReclaimPolicy(corev1api.PersistentVolumeReclaimRetain).Result()},
+			restoredPVC: []*corev1api.PersistentVolumeClaim{
+				builder.ForPersistentVolumeClaim("ns1", "pvc1").VolumeName("new-pv1").Phase(corev1api.ClaimBound).Result(),
+			},
+			expectedPatch: map[string]volume.PVInfo{"new-pv1": {
+				ReclaimPolicy: string(corev1api.PersistentVolumeReclaimDelete),
+				Labels:        map[string]string{"label1": "label1-val"},
+			}},
+			expectedErrNum: 0,
+		},
+		{
+			name: "two applicable volumeInfos",
+			backupVolumeInfoMap: map[string]volume.VolumeInfo{
+				"pv1": {
+					BackupMethod: "PodVolumeBackup",
+					PVCName:      "pvc1",
+					PVName:       "pv1",
+					PVCNamespace: "ns1",
+					PVInfo: volume.PVInfo{
+						ReclaimPolicy: string(corev1api.PersistentVolumeReclaimDelete),
+						Labels:        map[string]string{"label1": "label1-val"},
+					},
+				},
+				"pv2": {
+					BackupMethod: "CSISnapshot",
+					PVCName:      "pvc2",
+					PVName:       "pv2",
+					PVCNamespace: "ns2",
+					PVInfo: volume.PVInfo{
+						ReclaimPolicy: string(corev1api.PersistentVolumeReclaimDelete),
+						Labels:        map[string]string{"label2": "label2-val"},
+					},
+				},
+			},
+			restore: builder.ForRestore(velerov1api.DefaultNamespace, "restore").Result(),
+			restoredItems: map[itemKey]restoredItemStatus{
+				{resource: rk, namespace: "ns1", name: "pvc1"}: {itemExists: true},
+				{resource: rk, namespace: "ns2", name: "pvc2"}: {itemExists: true},
+			},
+			restoredPV: []*corev1api.PersistentVolume{
+				builder.ForPersistentVolume("new-pv1").ClaimRef("ns1", "pvc1").Phase(corev1api.VolumeBound).ReclaimPolicy(corev1api.PersistentVolumeReclaimRetain).Result(),
+				builder.ForPersistentVolume("new-pv2").ClaimRef("ns2", "pvc2").Phase(corev1api.VolumeBound).ReclaimPolicy(corev1api.PersistentVolumeReclaimRetain).Result(),
+			},
+			restoredPVC: []*corev1api.PersistentVolumeClaim{
+				builder.ForPersistentVolumeClaim("ns1", "pvc1").VolumeName("new-pv1").Phase(corev1api.ClaimBound).Result(),
+				builder.ForPersistentVolumeClaim("ns2", "pvc2").VolumeName("new-pv2").Phase(corev1api.ClaimBound).Result(),
+			},
+			expectedPatch: map[string]volume.PVInfo{
+				"new-pv1": {
+					ReclaimPolicy: string(corev1api.PersistentVolumeReclaimDelete),
+					Labels:        map[string]string{"label1": "label1-val"},
+				},
+				"new-pv2": {
+					ReclaimPolicy: string(corev1api.PersistentVolumeReclaimDelete),
+					Labels:        map[string]string{"label2": "label2-val"},
+				},
+			},
+			expectedErrNum: 0,
+		},
+		{
+			name: "an applicable volumeInfo with bound error",
+			backupVolumeInfoMap: map[string]volume.VolumeInfo{"pv": {
+				BackupMethod: "PodVolumeBackup",
+				PVCName:      "pvc1",
+				PVName:       "pv1",
+				PVCNamespace: "ns1",
+				PVInfo: volume.PVInfo{
+					ReclaimPolicy: string(corev1api.PersistentVolumeReclaimDelete),
+					Labels:        map[string]string{"label1": "label1-val"},
+				},
+			}},
+			restore:       builder.ForRestore(velerov1api.DefaultNamespace, "restore").Result(),
+			restoredItems: map[itemKey]restoredItemStatus{{resource: rk, namespace: "ns1", name: "pvc1"}: {itemExists: true}},
+			restoredPV: []*corev1api.PersistentVolume{
+				builder.ForPersistentVolume("new-pv1").ClaimRef("ns2", "pvc2").Phase(corev1api.VolumeBound).ReclaimPolicy(corev1api.PersistentVolumeReclaimRetain).Result()},
+			restoredPVC: []*corev1api.PersistentVolumeClaim{
+				builder.ForPersistentVolumeClaim("ns1", "pvc1").VolumeName("new-pv1").Phase(corev1api.ClaimBound).Result(),
+			},
+			expectedErrNum: 1,
+		},
+		{
+			name: "two applicable volumeInfos with an error",
+			backupVolumeInfoMap: map[string]volume.VolumeInfo{
+				"pv1": {
+					BackupMethod: "PodVolumeBackup",
+					PVCName:      "pvc1",
+					PVName:       "pv1",
+					PVCNamespace: "ns1",
+					PVInfo: volume.PVInfo{
+						ReclaimPolicy: string(corev1api.PersistentVolumeReclaimDelete),
+						Labels:        map[string]string{"label1": "label1-val"},
+					},
+				},
+				"pv2": {
+					BackupMethod: "CSISnapshot",
+					PVCName:      "pvc2",
+					PVName:       "pv2",
+					PVCNamespace: "ns2",
+					PVInfo: volume.PVInfo{
+						ReclaimPolicy: string(corev1api.PersistentVolumeReclaimDelete),
+						Labels:        map[string]string{"label2": "label2-val"},
+					},
+				},
+			},
+			restore: builder.ForRestore(velerov1api.DefaultNamespace, "restore").Result(),
+			restoredItems: map[itemKey]restoredItemStatus{
+				{resource: rk, namespace: "ns1", name: "pvc1"}: {itemExists: true},
+				{resource: rk, namespace: "ns2", name: "pvc2"}: {itemExists: true},
+			},
+			restoredPV: []*corev1api.PersistentVolume{
+				builder.ForPersistentVolume("new-pv1").ClaimRef("ns1", "pvc1").Phase(corev1api.VolumeBound).ReclaimPolicy(corev1api.PersistentVolumeReclaimRetain).Result(),
+				builder.ForPersistentVolume("new-pv2").ClaimRef("ns3", "pvc3").Phase(corev1api.VolumeBound).ReclaimPolicy(corev1api.PersistentVolumeReclaimRetain).Result(),
+			},
+			restoredPVC: []*corev1api.PersistentVolumeClaim{
+				builder.ForPersistentVolumeClaim("ns1", "pvc1").VolumeName("new-pv1").Phase(corev1api.ClaimBound).Result(),
+				builder.ForPersistentVolumeClaim("ns2", "pvc2").VolumeName("new-pv2").Phase(corev1api.ClaimBound).Result(),
+			},
+			expectedPatch: map[string]volume.PVInfo{
+				"new-pv1": {
+					ReclaimPolicy: string(corev1api.PersistentVolumeReclaimDelete),
+					Labels:        map[string]string{"label1": "label1-val"},
+				},
+			},
+			expectedErrNum: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		h := newHarness(t)
+		ctx := &restoreContext{
+			log:           h.log,
+			kbClient:      h.restorer.kbClient,
+			restoredItems: tc.restoredItems,
+			restore:       tc.restore,
+		}
+
+		for _, pv := range tc.restoredPV {
+			require.NoError(t, ctx.kbClient.Create(context.Background(), pv))
+		}
+		for _, pvc := range tc.restoredPVC {
+			require.NoError(t, ctx.kbClient.Create(context.Background(), pvc))
+		}
+
+		_, errs := ctx.patchDynamicPV(tc.backupVolumeInfoMap)
+		if tc.expectedErrNum > 0 {
+			assert.Equal(t, tc.expectedErrNum, len(errs.Namespaces))
+		}
+
+		for pvName, expectedPVInfo := range tc.expectedPatch {
+			pv := &corev1api.PersistentVolume{}
+			err := ctx.kbClient.Get(context.Background(), crclient.ObjectKey{Name: pvName}, pv)
+			assert.NoError(t, err)
+
+			assert.Equal(t, expectedPVInfo.ReclaimPolicy, string(pv.Spec.PersistentVolumeReclaimPolicy))
+			assert.Equal(t, expectedPVInfo.Labels, pv.Labels)
+		}
+
+	}
+}
+
+func TestBackupVolume(t *testing.T) {
+	backupVolumeInfoMap := make(map[string]volume.VolumeInfo)
+	_ = `{
+		"pvc-5c75b635-43b8-49e0-a172-1364ba105830":
+			{
+				"pvcName":"nginx-logs",
+				"pvcNamespace":"nginx-example",
+				"pvName":"pvc-5c75b635-43b8-49e0-a172-1364ba105830",
+				"backupMethod":"CSISnapshot",
+				"snapshotDataMoved":false,
+				"preserveLocalSnapshot":true,
+				"skipped":false,
+				"startTimestamp":"2023-11-30T06:58:35Z",
+				"operationID":"nginx-example/velero-nginx-logs-w9jcr/2023-11-30T06:58:40Z",
+				"csiSnapshotInfo":{
+					"snapshotHandle":"/subscriptions/2261f3e7-d159-48fe-95a3-0e6a96e11159/resourceGroups/mc_qix2_rg230731_qix2_k8s230731_eastus/providers/Microsoft.Compute/snapshots/snapshot-cdd0602b-913c-4b2b-9282-95adfff88c81",
+					"size":1073741824,
+					"driver":"disk.csi.azure.com",
+					"vscName":"snapcontent-cdd0602b-913c-4b2b-9282-95adfff88c81"
+				},
+				"snapshotDataMovementInfo":{
+					"dataMover":"",
+					"uploaderType":"",
+					"retainedSnapshot":"",
+					"snapshotHandle":""
+				},
+				"nativeSnapshotInfo":{
+					"snapshotHandle":"",
+					"volumeType":"",
+					"volumeAZ":"",
+					"iops":""
+				},
+				"pvbInfo":{
+					"snapshotHandle":"",
+					"size":0,
+					"uploaderType":"",
+					"volumeName":"",
+					"podName":"",
+					"podNamespace":"",
+					"nodeName":""
+				},
+				"pvInfo":{
+					"reclaimPolicy":"Retain",
+					"labels":{
+						"velero.io/dynamic-pv-restore":"nginx-example.nginx-logs.7nb8c",
+						"allentest/data":"True"
+					}
+				}
+			}
+		
+	}`
+
+	_ = `
+	{
+		"pvc-7579ae93-0eed-453d-afaa-3ba51cfc6cb9":
+			{
+				"pvcName":"nginx-logs",
+				"pvcNamespace":"nginx-example",
+				"pvName":"pvc-7579ae93-0eed-453d-afaa-3ba51cfc6cb9",
+				"backupMethod":"PodVolumeBackup",
+				"snapshotDataMoved":false,
+				"preserveLocalSnapshot":false,
+				"skipped":false,
+				"startTimestamp":"2023-11-30T12:57:18Z",
+				"csiSnapshotInfo":{
+					"snapshotHandle":"",
+					"size":0,
+					"driver":"",
+					"vscName":""
+				},
+				"snapshotDataMovementInfo":{
+					"dataMover":"",
+					"uploaderType":"",
+					"retainedSnapshot":"",
+					"snapshotHandle":""
+				},
+				"nativeSnapshotInfo":{
+					"snapshotHandle":"",
+					"volumeType":"",
+					"volumeAZ":"",
+					"iops":""
+				},
+				"pvbInfo":{
+					"snapshotHandle":"556d0b1dd4a5abd470835f689bbc2c09",
+					"size":0,
+					"uploaderType":"kopia",
+					"volumeName":"nginx-logs",
+					"podName":"nginx-deployment-78964c9995-q699z",
+					"podNamespace":"nginx-example",
+					"nodeName":"aks-agentpool-19096707-vmss000000"
+				},
+				"pvInfo":{
+					"reclaimPolicy":"Retain",
+					"labels":{
+						"velero.io/dynamic-pv-restore":"nginx-example.nginx-logs.7nb8c",
+						"allentest/data":"True"
+					}
+				}
+			}
+		
+	}
+	`
+
+	str3 := `
+	{
+		"pvc-c7925558-8060-41d6-af5a-32a11e37fe65":
+			{
+				"pvcName":"nginx-logs",
+				"pvcNamespace":"nginx-example",
+				"pvName":"pvc-c7925558-8060-41d6-af5a-32a11e37fe65",
+				"backupMethod":"CSISnapshot",
+				"snapshotDataMoved":true,
+				"preserveLocalSnapshot":false,
+				"skipped":false,
+				"startTimestamp":"2023-11-30T13:45:18Z",
+				"operationID":"du-1f0c9c3e-d988-4248-934a-b399583a6fdb.c7925558-8060-41d80b30e",
+				"csiSnapshotInfo":{
+					"snapshotHandle":"",
+					"size":0,
+					"driver":"disk.csi.azure.com",
+					"vscName":""
+				},
+				"snapshotDataMovementInfo":{
+					"dataMover":"",
+					"uploaderType":"kopia",
+					"retainedSnapshot":"",
+					"snapshotHandle":""
+				},
+				"nativeSnapshotInfo":{
+					"snapshotHandle":"",
+					"volumeType":"",
+					"volumeAZ":"",
+					"iops":""
+				},
+				"pvbInfo":{
+					"snapshotHandle":"",
+					"size":0,
+					"uploaderType":"",
+					"volumeName":"",
+					"podName":"",
+					"podNamespace":"",
+					"nodeName":""
+				},
+				"pvInfo":{
+					"reclaimPolicy":"Retain",
+					"labels":{
+						"allentest/data":"True",
+						"velero.io/dynamic-pv-restore":"nginx-example.nginx-logs.7nb8c"
+					}
+				}
+			}
+		
+	}
+	`
+
+	err := json.Unmarshal([]byte(str3), &backupVolumeInfoMap)
+	if err != nil {
+		t.Logf("unmarshal err: %s", err)
+	} else {
+		t.Logf("volume: %+v", backupVolumeInfoMap)
+	}
+
+	//scheme := runtime.NewScheme()
+	cl, err := crclient.New(crcConfig.GetConfigOrDie(), crclient.Options{})
+
+	pvName := "pvc-0399253e-177c-44d0-a8d5-c3de2076cc5b"
+	pv := &corev1api.PersistentVolume{}
+	err = cl.Get(context.Background(), crclient.ObjectKey{Name: pvName}, pv)
+	if err != nil {
+		t.Logf("Get err: %s", err)
+	}
+	t.Logf("pv: %+v", pv)
 }
